@@ -17,10 +17,15 @@ limitations under the License.
 package tls
 
 import (
+	"context"
 	"crypto/tls"
 	"errors"
+	"fmt"
+	"io"
+	"net"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/go-logr/logr"
@@ -644,5 +649,27 @@ func TestWatcherRecoversAfterNotFound(t *testing.T) {
 	handleAPIServerEvent(logr.Discard(), policy, func() { shutdownCalled = true }, strict)
 	if !shutdownCalled {
 		t.Fatal("creating a Strict APIServer after a NotFound bootstrap must invoke the shutdown callback")
+	}
+}
+
+func TestIsTransientClassifiesNetworkErrors(t *testing.T) {
+	// A restarting kube-apiserver surfaces connection refused, resets, EOF,
+	// HTTP/2 stream loss, and 500s; these must take the Intermediate
+	// fallback path, not the fatal one.
+	transient := []error{
+		apierrors.NewServiceUnavailable("unavailable"),
+		apierrors.NewTooManyRequests("throttled", 0),
+		apierrors.NewInternalError(fmt.Errorf("etcd leader election")),
+		context.DeadlineExceeded,
+		&net.OpError{Op: "dial", Err: syscall.ECONNREFUSED},
+		io.ErrUnexpectedEOF,
+	}
+	for _, err := range transient {
+		if !isTransient(err) {
+			t.Errorf("isTransient(%v) = false, want true", err)
+		}
+	}
+	if isTransient(apierrors.NewForbidden(schema.GroupResource{Group: "config.openshift.io", Resource: "apiservers"}, "cluster", nil)) {
+		t.Error("isTransient(Forbidden) = true, want false (fail closed)")
 	}
 }

@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"strings"
 	"time"
 
@@ -31,6 +32,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	utilnet "k8s.io/apimachinery/pkg/util/net"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/dynamic/dynamicinformer"
 	"k8s.io/client-go/rest"
@@ -366,11 +368,18 @@ func (s profileSpec) toGo() (uint16, string, []uint16, error) {
 }
 
 func isTransient(err error) bool {
+	var netErr net.Error
 	return apierrors.IsServiceUnavailable(err) ||
 		apierrors.IsTimeout(err) ||
 		apierrors.IsServerTimeout(err) ||
 		apierrors.IsTooManyRequests(err) ||
-		errors.Is(err, context.DeadlineExceeded)
+		apierrors.IsInternalError(err) ||
+		errors.Is(err, context.DeadlineExceeded) ||
+		utilnet.IsConnectionRefused(err) ||
+		utilnet.IsConnectionReset(err) ||
+		utilnet.IsProbableEOF(err) ||
+		utilnet.IsHTTP2ConnectionLost(err) ||
+		(errors.As(err, &netErr) && netErr.Timeout())
 }
 
 const (
@@ -644,13 +653,24 @@ func SetupProfileWatcher(mgr manager.Manager, policy *Policy, shutdown func()) e
 		return fmt.Errorf("registering TLS profile event handler: %w", err)
 	}
 
-	return mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
+	// The watcher runs on every replica, not just the leader: each replica's
+	// listeners must restart on a profile change, so the runnable opts out of
+	// leader election.
+	return mgr.Add(nonLeaderElectionRunnable{manager.RunnableFunc(func(ctx context.Context) error {
 		factory.Start(ctx.Done())
 		factory.WaitForCacheSync(ctx.Done())
 		<-ctx.Done()
 		return nil
-	}))
+	})})
 }
+
+// nonLeaderElectionRunnable wraps a manager.Runnable so it runs on all
+// replicas, including non-leaders.
+type nonLeaderElectionRunnable struct {
+	manager.Runnable
+}
+
+func (nonLeaderElectionRunnable) NeedLeaderElection() bool { return false }
 
 // handleAPIServerEvent processes an APIServer watch event: when the resolved
 // TLS settings (honored state, adherence, or profile) changed, it invokes the
