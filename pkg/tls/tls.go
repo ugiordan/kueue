@@ -368,14 +368,25 @@ func (s profileSpec) toGo() (uint16, string, []uint16, error) {
 }
 
 func isTransient(err error) bool {
-	var netErr net.Error
-	return apierrors.IsServiceUnavailable(err) ||
+	// Explicitly transient API statuses first.
+	if apierrors.IsServiceUnavailable(err) ||
 		apierrors.IsTimeout(err) ||
 		apierrors.IsServerTimeout(err) ||
 		apierrors.IsTooManyRequests(err) ||
 		apierrors.IsInternalError(err) ||
-		errors.Is(err, context.DeadlineExceeded) ||
-		utilnet.IsConnectionRefused(err) ||
+		errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	// Any other API-status error is a server-side rejection the caller did
+	// not already classify: fail closed rather than letting the transport
+	// predicates below catch it.
+	var statusErr *apierrors.StatusError
+	if errors.As(err, &statusErr) {
+		return false
+	}
+	// Transport-level errors for non-API-status failures.
+	var netErr net.Error
+	return utilnet.IsConnectionRefused(err) ||
 		utilnet.IsConnectionReset(err) ||
 		utilnet.IsProbableEOF(err) ||
 		utilnet.IsHTTP2ConnectionLost(err) ||

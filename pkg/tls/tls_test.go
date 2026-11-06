@@ -672,4 +672,10 @@ func TestIsTransientClassifiesNetworkErrors(t *testing.T) {
 	if isTransient(apierrors.NewForbidden(schema.GroupResource{Group: "config.openshift.io", Resource: "apiservers"}, "cluster", nil)) {
 		t.Error("isTransient(Forbidden) = true, want false (fail closed)")
 	}
+	if isTransient(apierrors.NewBadRequest("invalid request")) {
+		t.Error("isTransient(BadRequest) = true, want false (unexpected API status fails closed)")
+	}
+	if isTransient(apierrors.NewInvalid(schema.GroupKind{Group: "config.openshift.io", Kind: "APIServer"}, "cluster", nil)) {
+		t.Error("isTransient(Invalid) = true, want false (unexpected API status fails closed)")
+	}
 }
