@@ -197,16 +197,21 @@ func resolveFromClient(ctx context.Context, dyn dynamic.Interface) (*Policy, err
 			policy.APIAvailable = true
 			return policy, nil
 		case apierrors.IsForbidden(err), apierrors.IsUnauthorized(err):
+			statusCode, _ := apiStatusCode(err)
 			return nil, fmt.Errorf("not authorized to read the APIServer TLS profile (grant get/list/watch on "+
-				"apiservers.config.openshift.io and restart): %w", err)
+				"apiservers.config.openshift.io and restart, API status code %d)", statusCode)
 		case isTransient(err):
+			statusCode, _ := apiStatusCode(err)
 			logger.Info("Transient error reading TLS profile, applying Intermediate defaults until the watcher recovers",
-				"error", err)
+				"errorClass", transientErrorClass(err), "statusCode", statusCode)
 			policy.APIAvailable = true
 			policy.UsedTransientFallback = true
 			policy.ClusterProfile = profileSpec{Type: profileIntermediate}
 			return policy.withEffectiveProfile(policy.ClusterProfile)
 		default:
+			if code, isAPIStatus := apiStatusCode(err); isAPIStatus {
+				return nil, fmt.Errorf("reading APIServer TLS profile failed with API status code %d", code)
+			}
 			return nil, fmt.Errorf("reading APIServer TLS profile: %w", err)
 		}
 	}
@@ -396,6 +401,45 @@ func isTransient(err error) bool {
 		utilnet.IsProbableEOF(err) ||
 		utilnet.IsHTTP2ConnectionLost(err) ||
 		(errors.As(err, &netErr) && netErr.Timeout())
+}
+
+func apiStatusCode(err error) (int32, bool) {
+	var apiStatus apierrors.APIStatus
+	if errors.As(err, &apiStatus) {
+		return apiStatus.Status().Code, true
+	}
+	return 0, false
+}
+
+func transientErrorClass(err error) string {
+	switch {
+	case apierrors.IsServiceUnavailable(err):
+		return "service-unavailable"
+	case apierrors.IsTimeout(err):
+		return "timeout"
+	case apierrors.IsServerTimeout(err):
+		return "server-timeout"
+	case apierrors.IsTooManyRequests(err):
+		return "too-many-requests"
+	case apierrors.IsInternalError(err):
+		return "internal-error"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "deadline-exceeded"
+	case utilnet.IsConnectionRefused(err):
+		return "connection-refused"
+	case utilnet.IsConnectionReset(err):
+		return "connection-reset"
+	case utilnet.IsProbableEOF(err):
+		return "unexpected-eof"
+	case utilnet.IsHTTP2ConnectionLost(err):
+		return "http2-connection-lost"
+	default:
+		var netErr net.Error
+		if errors.As(err, &netErr) && netErr.Timeout() {
+			return "network-timeout"
+		}
+		return "transient"
+	}
 }
 
 const (
@@ -636,12 +680,19 @@ func SetupProfileWatcher(mgr manager.Manager, policy *Policy, shutdown func()) e
 	if policy == nil || !policy.APIAvailable {
 		return nil
 	}
-	logger := log.Log.WithName("tls")
-
 	dyn, err := dynamic.NewForConfig(mgr.GetConfig())
 	if err != nil {
 		return fmt.Errorf("creating dynamic client for TLS profile watcher: %w", err)
 	}
+	return setupProfileWatcher(mgr, dyn, policy, shutdown)
+}
+
+type profileWatcherRunnableRegistrar interface {
+	Add(manager.Runnable) error
+}
+
+func setupProfileWatcher(mgr profileWatcherRunnableRegistrar, dyn dynamic.Interface, policy *Policy, shutdown func()) error {
+	logger := log.Log.WithName("tls")
 	factory := dynamicinformer.NewFilteredDynamicSharedInformerFactory(dyn, 0, metav1.NamespaceAll,
 		func(options *metav1.ListOptions) {
 			options.FieldSelector = "metadata.name=" + apiServerName
@@ -651,7 +702,7 @@ func SetupProfileWatcher(mgr manager.Manager, policy *Policy, shutdown func()) e
 	// The handler runs for the initial list as well as updates, so a change
 	// made between the startup resolution and the watch being established is
 	// still detected.
-	_, err = informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+	_, err := informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
 			handleAPIServerEvent(logger, policy, shutdown, obj)
 		},
@@ -675,6 +726,9 @@ func SetupProfileWatcher(mgr manager.Manager, policy *Policy, shutdown func()) e
 	return mgr.Add(nonLeaderElectionRunnable{manager.RunnableFunc(func(ctx context.Context) error {
 		factory.Start(ctx.Done())
 		factory.WaitForCacheSync(ctx.Done())
+		if !informer.HasSynced() {
+			return nil
+		}
 		// If the object existed during Resolve but was deleted before the
 		// watch's initial list, the informer emits no DeleteFunc event. Restart
 		// so listeners rebuild using the absent-object defaults. If it was
@@ -683,7 +737,7 @@ func SetupProfileWatcher(mgr manager.Manager, policy *Policy, shutdown func()) e
 		if policy.APIServerFound {
 			_, exists, getErr := informer.GetIndexer().GetByKey(apiServerName)
 			if getErr != nil {
-				logger.Error(getErr, "failed to check APIServer cache after initial sync")
+				logger.Info("failed to check APIServer cache after initial sync", "errorClass", "cache-lookup")
 				shutdown()
 			} else if shouldRestartForMissingAPIServer(policy, exists) {
 				logger.Info("APIServer object missing after initial watch sync; shutting down to rebuild listeners")
@@ -723,7 +777,7 @@ func handleAPIServerEvent(logger logr.Logger, policy *Policy, shutdown func(), o
 	}
 	tlsSpec, err := extractAPIServerTLS(apiServer)
 	if err != nil {
-		logger.Error(err, "Failed to parse APIServer TLS profile, ignoring the event")
+		logger.Info("Failed to parse APIServer TLS profile, ignoring the event", "errorClass", "invalid-object")
 		return
 	}
 	switch checkTLSProfileChange(policy, tlsSpec) {

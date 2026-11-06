@@ -18,6 +18,7 @@ package visibility
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"net"
 	"os"
@@ -93,21 +94,15 @@ func applyVisibilityServerOptions(config *genericapiserver.RecommendedConfig, tl
 	o.SecureServing.ServerCert.CertDirectory = "/tmp"
 	o.Admission.DisablePlugins = disabledPlugins
 	o.SecureServing.MinTLSVersion, o.SecureServing.CipherSuites = secureServingTLS(tlsPolicy)
+	if err := validateVisibilityTLSCipherSuites(tlsPolicy, o.SecureServing.CipherSuites); err != nil {
+		return err
+	}
 	if secureServingHTTP2Disabled(tlsPolicy) {
 		// The apiserver secure serving path configures HTTP/2 explicitly and
 		// fails the listener at startup when the TLS 1.2 cipher list has no
 		// ECDHE AES-128-GCM suite. Serve HTTP/1.1 only for such profiles
 		// instead of failing to start.
 		o.SecureServing.DisableHTTP2Serving = true
-	}
-	if len(o.SecureServing.CipherSuites) > 0 && cipherSuitesAllECDSA(o.SecureServing.CipherSuites) {
-		// The self-signed certificate below is RSA; an ECDSA-only TLS 1.2
-		// cipher list cannot negotiate with it, so TLS 1.2-max clients fail
-		// handshakes. TLS 1.3 is unaffected (its suites work with any
-		// certificate type), and the visibility API's consumers are
-		// TLS 1.3-capable, so warn rather than rejecting the profile.
-		setupLog.Info("cluster TLS profile names only ECDSA cipher suites; TLS 1.2 handshakes on the visibility API will fail against the RSA self-signed certificate (TLS 1.3 is unaffected)",
-			"cipherSuites", o.SecureServing.CipherSuites)
 	}
 	if err := o.SecureServing.MaybeDefaultWithSelfSignedCerts("localhost", nil, []net.IP{net.ParseIP("127.0.0.1")}); err != nil {
 		return fmt.Errorf("error creating self-signed certificates: %v", err)
@@ -134,6 +129,14 @@ func cipherSuitesAllECDSA(names []string) bool {
 		}
 	}
 	return true
+}
+
+func validateVisibilityTLSCipherSuites(tlsPolicy *kueuetls.Policy, names []string) error {
+	if tlsPolicy != nil && tlsPolicy.Honored && tlsPolicy.MinVersion < tls.VersionTLS13 &&
+		len(names) > 0 && cipherSuitesAllECDSA(names) {
+		return fmt.Errorf("honored TLS profile allows only ECDSA TLS 1.2 cipher suites, but the visibility listener uses an RSA self-signed certificate")
+	}
+	return nil
 }
 
 // secureServingTLS returns the OpenShift TLS version and IANA cipher suite
