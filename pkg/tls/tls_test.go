@@ -678,4 +678,12 @@ func TestIsTransientClassifiesNetworkErrors(t *testing.T) {
 	if isTransient(apierrors.NewInvalid(schema.GroupKind{Group: "config.openshift.io", Kind: "APIServer"}, "cluster", nil)) {
 		t.Error("isTransient(Invalid) = true, want false (unexpected API status fails closed)")
 	}
+
+	// Caller-level coverage: the full resolution path must fail closed on an
+	// unexpected API status rather than silently applying the Intermediate
+	// fallback.
+	if _, err := resolveFromClient(t.Context(), fakeClient(t, nil,
+		apierrors.NewBadRequest("invalid request"))); err == nil {
+		t.Fatal("resolveFromClient() returned an Intermediate fallback for an unexpected API status")
+	}
 }
