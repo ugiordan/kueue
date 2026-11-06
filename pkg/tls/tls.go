@@ -70,6 +70,10 @@ type Policy struct {
 	// APIAvailable reports whether the APIServer object can be watched on
 	// this cluster. It is false outside OpenShift.
 	APIAvailable bool
+	// APIServerFound reports whether the named object existed during initial
+	// resolution. The watcher compares this with its initial cache after sync
+	// to catch deletion in the Resolve-to-watch bootstrap window.
+	APIServerFound bool
 	// UsedTransientFallback reports that the profile could not be read due
 	// to a transient error and hardened Intermediate defaults are applied
 	// until the watcher observes the real profile.
@@ -207,6 +211,7 @@ func resolveFromClient(ctx context.Context, dyn dynamic.Interface) (*Policy, err
 		}
 	}
 
+	policy.APIServerFound = true
 	tlsSpec, err := extractAPIServerTLS(obj)
 	if err != nil {
 		return nil, fmt.Errorf("parsing APIServer TLS profile: %w", err)
@@ -670,9 +675,32 @@ func SetupProfileWatcher(mgr manager.Manager, policy *Policy, shutdown func()) e
 	return mgr.Add(nonLeaderElectionRunnable{manager.RunnableFunc(func(ctx context.Context) error {
 		factory.Start(ctx.Done())
 		factory.WaitForCacheSync(ctx.Done())
+		// If the object existed during Resolve but was deleted before the
+		// watch's initial list, the informer emits no DeleteFunc event. Restart
+		// so listeners rebuild using the absent-object defaults. If it was
+		// already absent during Resolve, do not shut down: AddFunc will catch
+		// its later creation.
+		if policy.APIServerFound {
+			_, exists, getErr := informer.GetIndexer().GetByKey(apiServerName)
+			if getErr != nil {
+				logger.Error(getErr, "failed to check APIServer cache after initial sync")
+				shutdown()
+			} else if shouldRestartForMissingAPIServer(policy, exists) {
+				logger.Info("APIServer object missing after initial watch sync; shutting down to rebuild listeners")
+				shutdown()
+			}
+		}
 		<-ctx.Done()
 		return nil
 	})})
+}
+
+// shouldRestartForMissingAPIServer reports whether the APIServer existed
+// during initial resolution but is absent from the watch's initial cache.
+// If it was already absent during resolution, preserve defaults and let the
+// watcher's AddFunc catch a later creation instead of restarting immediately.
+func shouldRestartForMissingAPIServer(policy *Policy, existsInCache bool) bool {
+	return policy != nil && policy.APIServerFound && !existsInCache
 }
 
 // nonLeaderElectionRunnable wraps a manager.Runnable so it runs on all

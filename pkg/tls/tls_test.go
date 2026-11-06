@@ -248,6 +248,9 @@ func TestResolveNoOpinionPreservesExistingSettings(t *testing.T) {
 			if policy.Honored {
 				t.Fatal("expected policy not honored")
 			}
+			if !policy.APIServerFound {
+				t.Fatal("expected APIServerFound for a successful APIServer read")
+			}
 			if len(policy.TLSOpts) != 0 {
 				t.Error("expected no TLSOpts so existing listener settings are preserved")
 			}
@@ -683,7 +686,27 @@ func TestIsTransientClassifiesNetworkErrors(t *testing.T) {
 	// unexpected API status rather than silently applying the Intermediate
 	// fallback.
 	if _, err := resolveFromClient(t.Context(), fakeClient(t, nil,
-		apierrors.NewBadRequest("invalid request"))); err == nil {
+		apierrors.NewBadRequest("connection reset by peer"))); err == nil {
 		t.Fatal("resolveFromClient() returned an Intermediate fallback for an unexpected API status")
+	}
+}
+
+func TestShouldRestartForMissingAPIServer(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		policy        *Policy
+		existsInCache bool
+		want          bool
+	}{
+		{name: "resolved object deleted before initial list", policy: &Policy{APIServerFound: true}, want: true},
+		{name: "object already absent during resolution", policy: &Policy{APIAvailable: true}, want: false},
+		{name: "object still present", policy: &Policy{APIServerFound: true}, existsInCache: true, want: false},
+		{name: "nil policy", existsInCache: false, want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := shouldRestartForMissingAPIServer(tc.policy, tc.existsInCache); got != tc.want {
+				t.Errorf("shouldRestartForMissingAPIServer() = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
