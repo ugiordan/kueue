@@ -81,3 +81,21 @@ func TestSecureServingHTTP2Disabled(t *testing.T) {
 		})
 	}
 }
+
+func TestCipherSuitesAllECDSA(t *testing.T) {
+	cases := []struct {
+		names []string
+		want  bool
+	}{
+		{nil, false},
+		{[]string{"TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256"}, true},
+		{[]string{"TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256", "TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384"}, true},
+		{[]string{"TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256", "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"}, false},
+		{[]string{"TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"}, false},
+	}
+	for _, tc := range cases {
+		if got := cipherSuitesAllECDSA(tc.names); got != tc.want {
+			t.Errorf("cipherSuitesAllECDSA(%v) = %v, want %v", tc.names, got, tc.want)
+		}
+	}
+}

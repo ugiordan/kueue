@@ -100,10 +100,33 @@ func applyVisibilityServerOptions(config *genericapiserver.RecommendedConfig, tl
 		// instead of failing to start.
 		o.SecureServing.DisableHTTP2Serving = true
 	}
+	if len(o.SecureServing.CipherSuites) > 0 && cipherSuitesAllECDSA(o.SecureServing.CipherSuites) {
+		// The self-signed certificate below is RSA; an ECDSA-only TLS 1.2
+		// cipher list cannot negotiate with it, so TLS 1.2-max clients fail
+		// handshakes. TLS 1.3 is unaffected (its suites work with any
+		// certificate type), and the visibility API's consumers are
+		// TLS 1.3-capable, so warn rather than rejecting the profile.
+		setupLog.Info("cluster TLS profile names only ECDSA cipher suites; TLS 1.2 handshakes on the visibility API will fail against the RSA self-signed certificate (TLS 1.3 is unaffected)",
+			"cipherSuites", o.SecureServing.CipherSuites)
+	}
 	if err := o.SecureServing.MaybeDefaultWithSelfSignedCerts("localhost", nil, []net.IP{net.ParseIP("127.0.0.1")}); err != nil {
 		return fmt.Errorf("error creating self-signed certificates: %v", err)
 	}
 	return o.ApplyTo(config)
+}
+
+// cipherSuitesAllECDSA reports whether every IANA cipher suite name uses
+// ECDSA authentication, which an RSA certificate cannot negotiate.
+func cipherSuitesAllECDSA(names []string) bool {
+	if len(names) == 0 {
+		return false
+	}
+	for _, name := range names {
+		if !strings.Contains(name, "ECDSA") {
+			return false
+		}
+	}
+	return true
 }
 
 // secureServingTLS returns the OpenShift TLS version and IANA cipher suite
