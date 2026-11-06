@@ -112,6 +112,13 @@ func applyVisibilityServerOptions(config *genericapiserver.RecommendedConfig, tl
 	if err := o.SecureServing.MaybeDefaultWithSelfSignedCerts("localhost", nil, []net.IP{net.ParseIP("127.0.0.1")}); err != nil {
 		return fmt.Errorf("error creating self-signed certificates: %v", err)
 	}
+	// NOTE: the profile's curve preferences (tlsPolicy.CurveIDs) are not
+	// applied here. The apiserver's SecureServingInfo exposes only
+	// MinTLSVersion and CipherSuites; its tls.Config is constructed
+	// internally during Serve with no curve-preferences hook. The manager's
+	// webhook and metrics listeners apply the full profile including curves;
+	// the visibility listener's curve set stays at the Go defaults until the
+	// apiserver serving path gains a curve knob.
 	return o.ApplyTo(config)
 }
 
