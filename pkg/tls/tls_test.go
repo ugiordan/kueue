@@ -605,3 +605,18 @@ func TestOldProfileStillServesDocumentedLegacySuites(t *testing.T) {
 		}
 	}
 }
+
+func TestCustomProfileRejectsECDHE3DESSuite(t *testing.T) {
+	// The ECDHE-RSA 3DES variant (0xC012) is implemented by Go's
+	// InsecureCipherSuites; it must be refused like the RSA variant.
+	for _, name := range []string{
+		"TLS_ECDHE_RSA_WITH_3DES_EDE_CBC_SHA",
+		"ECDHE-RSA-DES-CBC3-SHA",
+	} {
+		spec := profileSpec{Type: profileCustom, MinTLSVersion: versionTLS12, Ciphers: []string{name}}
+		_, _, _, err := spec.toGo()
+		if err == nil || !strings.Contains(err.Error(), "is refused") {
+			t.Fatalf("toGo() ciphers=[%s]: err = %v, want the banned-suite rejection", name, err)
+		}
+	}
+}

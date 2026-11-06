@@ -417,26 +417,28 @@ func curveIDs(groups []string) []tls.CurveID {
 // documented and still serves these suites when the cluster selects it.
 var bannedCipherSuites = map[string]struct{}{
 	// RC4
-	"TLS_RSA_WITH_RC4_128_SHA":              {},
-	"TLS_ECDHE_RSA_WITH_RC4_128_SHA":        {},
-	"TLS_ECDHE_ECDSA_WITH_RC4_128_SHA":      {},
-	"RC4-SHA":                               {},
+	"TLS_RSA_WITH_RC4_128_SHA":         {},
+	"TLS_ECDHE_RSA_WITH_RC4_128_SHA":   {},
+	"TLS_ECDHE_ECDSA_WITH_RC4_128_SHA": {},
+	"RC4-SHA":                          {},
 	// 3DES
-	"TLS_RSA_WITH_3DES_EDE_CBC_SHA":         {},
-	"DES-CBC3-SHA":                          {},
+	"TLS_RSA_WITH_3DES_EDE_CBC_SHA":       {},
+	"TLS_ECDHE_RSA_WITH_3DES_EDE_CBC_SHA": {},
+	"DES-CBC3-SHA":                        {},
+	"ECDHE-RSA-DES-CBC3-SHA":              {},
 	// SHA-1 CBC
-	"TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA":  {},
-	"TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA":    {},
-	"TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA":  {},
-	"TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA":    {},
-	"TLS_RSA_WITH_AES_128_CBC_SHA":          {},
-	"TLS_RSA_WITH_AES_256_CBC_SHA":          {},
-	"ECDHE-ECDSA-AES128-SHA":                {},
-	"ECDHE-RSA-AES128-SHA":                  {},
-	"ECDHE-ECDSA-AES256-SHA":                {},
-	"ECDHE-RSA-AES256-SHA":                  {},
-	"AES128-SHA":                            {},
-	"AES256-SHA":                            {},
+	"TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA": {},
+	"TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA":   {},
+	"TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA": {},
+	"TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA":   {},
+	"TLS_RSA_WITH_AES_128_CBC_SHA":         {},
+	"TLS_RSA_WITH_AES_256_CBC_SHA":         {},
+	"ECDHE-ECDSA-AES128-SHA":               {},
+	"ECDHE-RSA-AES128-SHA":                 {},
+	"ECDHE-ECDSA-AES256-SHA":               {},
+	"ECDHE-RSA-AES256-SHA":                 {},
+	"AES128-SHA":                           {},
+	"AES256-SHA":                           {},
 }
 
 // isBannedCipherSuite reports whether name (IANA or OpenSSL spelling) is a
@@ -646,6 +648,12 @@ func SetupProfileWatcher(mgr manager.Manager, policy *Policy, shutdown func()) e
 	_, err = informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc:    check,
 		UpdateFunc: func(_, newObj interface{}) { check(newObj) },
+		DeleteFunc: func(_ interface{}) {
+			// Deleting the named APIServer leaves the resolved profile stale;
+			// restart so the listeners rebuild from the absent-object defaults.
+			logger.Info("APIServer object deleted, shutting down to rebuild listeners")
+			shutdown()
+		},
 	})
 	if err != nil {
 		return fmt.Errorf("registering TLS profile event handler: %w", err)
