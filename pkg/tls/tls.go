@@ -25,6 +25,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-logr/logr"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -184,6 +185,10 @@ func resolveFromClient(ctx context.Context, dyn dynamic.Interface) (*Policy, err
 			return policy, nil
 		case apierrors.IsNotFound(err):
 			logger.Info("APIServer object not found, preserving existing listener settings")
+			// Bootstrap races can return NotFound even on OpenShift clusters:
+			// mark the API available so the watcher registers, and its AddFunc
+			// catches the object's creation to rebuild the listeners.
+			policy.APIAvailable = true
 			return policy, nil
 		case apierrors.IsForbidden(err), apierrors.IsUnauthorized(err):
 			return nil, fmt.Errorf("not authorized to read the APIServer TLS profile (grant get/list/watch on "+
@@ -621,33 +626,13 @@ func SetupProfileWatcher(mgr manager.Manager, policy *Policy, shutdown func()) e
 	// The handler runs for the initial list as well as updates, so a change
 	// made between the startup resolution and the watch being established is
 	// still detected.
-	check := func(obj interface{}) {
-		apiServer, ok := obj.(*unstructured.Unstructured)
-		if !ok {
-			return
-		}
-		tlsSpec, err := extractAPIServerTLS(apiServer)
-		if err != nil {
-			logger.Error(err, "Failed to parse APIServer TLS profile, ignoring the event")
-			return
-		}
-		switch checkTLSProfileChange(policy, tlsSpec) {
-		case tlsProfileHonoredChanged:
-			logger.Info("TLS honored state changed, shutting down to rebuild listeners",
-				"old", policy.Honored, "new", shouldHonorClusterTLSProfile(tlsSpec.TLSAdherence))
-			shutdown()
-		case tlsProfileAdherenceChanged:
-			logger.Info("TLS adherence policy changed, shutting down to rebuild listeners",
-				"old", policy.Adherence, "new", tlsSpec.TLSAdherence)
-			shutdown()
-		case tlsProfileSpecChanged:
-			logger.Info("TLS profile changed, shutting down to rebuild listeners")
-			shutdown()
-		}
-	}
 	_, err = informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc:    check,
-		UpdateFunc: func(_, newObj interface{}) { check(newObj) },
+		AddFunc: func(obj interface{}) {
+			handleAPIServerEvent(logger, policy, shutdown, obj)
+		},
+		UpdateFunc: func(_, newObj interface{}) {
+			handleAPIServerEvent(logger, policy, shutdown, newObj)
+		},
 		DeleteFunc: func(_ interface{}) {
 			// Deleting the named APIServer leaves the resolved profile stale;
 			// restart so the listeners rebuild from the absent-object defaults.
@@ -665,6 +650,36 @@ func SetupProfileWatcher(mgr manager.Manager, policy *Policy, shutdown func()) e
 		<-ctx.Done()
 		return nil
 	}))
+}
+
+// handleAPIServerEvent processes an APIServer watch event: when the resolved
+// TLS settings (honored state, adherence, or profile) changed, it invokes the
+// shutdown callback so the process restarts and the listeners are rebuilt. It
+// is the AddFunc and UpdateFunc handler of the profile watcher, and covers the
+// creation of the APIServer after a NotFound bootstrap.
+func handleAPIServerEvent(logger logr.Logger, policy *Policy, shutdown func(), obj interface{}) {
+	apiServer, ok := obj.(*unstructured.Unstructured)
+	if !ok {
+		return
+	}
+	tlsSpec, err := extractAPIServerTLS(apiServer)
+	if err != nil {
+		logger.Error(err, "Failed to parse APIServer TLS profile, ignoring the event")
+		return
+	}
+	switch checkTLSProfileChange(policy, tlsSpec) {
+	case tlsProfileHonoredChanged:
+		logger.Info("TLS honored state changed, shutting down to rebuild listeners",
+			"old", policy.Honored, "new", shouldHonorClusterTLSProfile(tlsSpec.TLSAdherence))
+		shutdown()
+	case tlsProfileAdherenceChanged:
+		logger.Info("TLS adherence policy changed, shutting down to rebuild listeners",
+			"old", policy.Adherence, "new", tlsSpec.TLSAdherence)
+		shutdown()
+	case tlsProfileSpecChanged:
+		logger.Info("TLS profile changed, shutting down to rebuild listeners")
+		shutdown()
+	}
 }
 
 func profileSpecEqual(a, b profileSpec) bool {

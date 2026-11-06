@@ -23,6 +23,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/go-logr/logr"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -309,8 +310,10 @@ func TestResolveAPIServerNotFoundPreservesExistingSettings(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolveFromClient() error = %v", err)
 	}
-	if policy.APIAvailable || policy.Honored || len(policy.TLSOpts) != 0 {
-		t.Errorf("policy = %+v, want preserved existing settings", policy)
+	// Bootstrap race: settings are preserved, but the API is marked available
+	// so the watcher registers and AddFunc catches the object's creation.
+	if !policy.APIAvailable || policy.Honored || len(policy.TLSOpts) != 0 {
+		t.Errorf("policy = %+v, want preserved settings with the watcher registered", policy)
 	}
 }
 
@@ -618,5 +621,28 @@ func TestCustomProfileRejectsECDHE3DESSuite(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "is refused") {
 			t.Fatalf("toGo() ciphers=[%s]: err = %v, want the banned-suite rejection", name, err)
 		}
+	}
+}
+
+func TestWatcherRecoversAfterNotFound(t *testing.T) {
+	// A NotFound bootstrap leaves the policy un-honored; creating the
+	// APIServer with a Strict profile must fire the watcher's event handler
+	// and invoke the shutdown callback so the listeners rebuild.
+	notFound := apierrors.NewNotFound(
+		schema.GroupResource{Group: "config.openshift.io", Resource: "apiservers"}, apiServerName,
+	)
+	policy, err := resolveFromClient(t.Context(), fakeClient(t, nil, notFound))
+	if err != nil {
+		t.Fatalf("resolveFromClient() error = %v", err)
+	}
+	if !policy.APIAvailable {
+		t.Fatal("precondition: NotFound must mark the API available")
+	}
+
+	strict := apiServerObject(strictSpec(customProfile(versionTLS12, []string{"ECDHE-RSA-AES128-GCM-SHA256"})))
+	shutdownCalled := false
+	handleAPIServerEvent(logr.Discard(), policy, func() { shutdownCalled = true }, strict)
+	if !shutdownCalled {
+		t.Fatal("creating a Strict APIServer after a NotFound bootstrap must invoke the shutdown callback")
 	}
 }
